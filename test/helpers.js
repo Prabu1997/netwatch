@@ -29,6 +29,16 @@ function ipv4Packet({ src, dst, proto, sport, dport, payload, flags = 0x18 }) {
   return Buffer.concat([h, l4, payload]);
 }
 
+// groups: array of 8 numbers per address
+function ipv6Packet({ src, dst, proto, sport, dport, payload, flags = 0x18 }) {
+  const addr = g => Buffer.concat(g.map(u16));
+  const l4 = proto === 'tcp'
+    ? Buffer.concat([u16(sport), u16(dport), Buffer.alloc(8), Buffer.from([0x50, flags]), Buffer.alloc(6)])
+    : Buffer.concat([u16(sport), u16(dport), u16(8 + payload.length), u16(0)]);
+  const h = Buffer.concat([Buffer.from([0x60, 0, 0, 0]), u16(l4.length + payload.length), Buffer.from([proto === 'tcp' ? 6 : 17, 64]), addr(src), addr(dst)]);
+  return Buffer.concat([h, l4, payload]);
+}
+
 const ether = ip => Buffer.concat([Buffer.alloc(12), u16(0x0800), ip]);
 
 function pcap(packets, linktype = 1) {
@@ -36,4 +46,4 @@ function pcap(packets, linktype = 1) {
   return Buffer.concat([g, ...packets.map(p => { const r = Buffer.alloc(16); r.writeUInt32LE(1, 0); r.writeUInt32LE(p.length, 8); r.writeUInt32LE(p.length, 12); return Buffer.concat([r, p]); })]);
 }
 
-module.exports = { clientHello, dnsQuery, ipv4Packet, ether, pcap };
+module.exports = { clientHello, dnsQuery, ipv4Packet, ipv6Packet, ether, pcap };

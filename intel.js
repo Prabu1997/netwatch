@@ -4,6 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const dns = require('dns').promises;
+const store = require('./lib/store');
 
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const CACHE = path.join(DATA_DIR, 'feeds.json');
@@ -41,7 +42,13 @@ function parse(feed, text) {
 }
 
 const CUSTOM = path.join(DATA_DIR, 'custom.txt'); // one IP/CIDR per line: your own blocklist, also handy for testing
-function loadCustom() { try { return parse({ id: 'custom' }, fs.readFileSync(CUSTOM, 'utf8')); } catch { return { ips: [], nets: [] }; } }
+let lastCustom = { ips: [], nets: [] };
+function loadCustom() {
+  // An untrusted (user-editable while we run as root) list is ignored; the last trusted copy stays in force.
+  const txt = store.read(CUSTOM);
+  if (txt !== null) lastCustom = parse({ id: 'custom' }, txt);
+  return lastCustom;
+}
 
 function index(parsed) { // parsed: { feedId: {ips, nets} }
   lastParsed = parsed;
@@ -72,12 +79,12 @@ async function refresh(log = console.log) {
   }));
   // keep previously cached data for feeds that failed today
   let old = {};
-  try { old = JSON.parse(fs.readFileSync(CACHE, 'utf8')).parsed || {}; } catch {}
+  try { old = JSON.parse(store.read(CACHE)).parsed || {}; } catch {}
   for (const f of FEEDS.filter(f => f.url)) if (!parsed[f.id] && old[f.id]) parsed[f.id] = old[f.id];
   if (Object.keys(parsed).length) {
     index(parsed);
     status.updated = Date.now();
-    try { fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(CACHE, JSON.stringify({ updated: status.updated, status: status.feeds, parsed })); } catch (e) { log('cache write failed: ' + e.message); }
+    if (!store.write(CACHE, JSON.stringify({ updated: status.updated, status: status.feeds, parsed }))) log('cache write skipped (data folder not trusted or not writable)');
   }
   status.loading = false;
   log(`threat feeds loaded: ${exact.size} IPs, ${cidrs.length} CIDRs`);
@@ -86,7 +93,7 @@ async function refresh(log = console.log) {
 function init(log = console.log) {
   let age = Infinity;
   try {
-    const c = JSON.parse(fs.readFileSync(CACHE, 'utf8'));
+    const c = JSON.parse(store.read(CACHE));
     index(c.parsed); status.feeds = Object.fromEntries(Object.entries(c.status || {}).filter(([k]) => FEEDS.some(f => f.id === k && f.url))); status.updated = c.updated; age = Date.now() - c.updated;
     log(`loaded cached feeds (${Math.round(age / 3600000)}h old)`);
   } catch {}

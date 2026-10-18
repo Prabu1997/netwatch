@@ -35,7 +35,29 @@ Netwatch runs natively on both. Linux uses `ss` + `/proc` + iptables; macOS uses
   - *First contact*: for interpreters and download tools (python, node, curl, bash, nc, ...), the first time a program connects to a
     destination it has never used. The first 10 minutes only learn (`BASELINE_LEARN_MIN=<n>` to change); the baseline persists in
     `data/baseline.json`. Browsers and apps are deliberately excluded because they contact new sites constantly. Medium severity: flagged, never auto-blocked.
+- **Nothing slips between polls**: with root capture, every outbound TCP connection (seen by its SYN) and UDP/QUIC flow is recorded from
+  packets and shown as a `pkt` row, attributed to its process by local port when the socket list knows it. Short-lived connections and
+  QUIC are no longer invisible.
+- **DNS filter / domain blocking** (opt-in): `DNS_FILTER=1 DNS_UPSTREAM=8.8.8.8 sudo node server.js` starts a local resolver on port 53
+  (`DNS_PORT` to change). Blocked names get NXDOMAIN; the rest is forwarded untouched. Block lists: abuse.ch URLhaus (downloaded daily),
+  your own `data/domains.txt` (one domain per line; subdomains are included), and policy rules with a `domain` field. Name-based blocking
+  avoids the collateral damage of blocking a shared CDN address. It does **not** change your system DNS: point a client at it to test
+  (`dig @127.0.0.1 example.org`), and set your system DNS to `127.0.0.1` only when you want it system-wide (macOS:
+  `sudo networksetup -setdnsservers Wi-Fi 127.0.0.1`, undo with `... empty`). Set `DNS_UPSTREAM` explicitly in that case.
+  UDP only: DNS-over-HTTPS/TLS and TCP DNS bypass it (a connection to a blocked name is still flagged by its TLS handshake).
 - Not done yet: decrypting TLS, so encrypted payloads are classified by SNI and metadata only.
+
+### Security of Netwatch itself
+
+- **API token**: every endpoint except the static page needs a token. It is printed at start-up as a link
+  (`http://127.0.0.1:8080/#t=...`; open it once and the browser remembers it), stored in `data/api-token` (mode 0600), and reused after a restart.
+  Requests are also refused unless Host/Origin are local, which defeats DNS-rebinding and drive-by web pages. Block/unblock is rate-limited,
+  and the machine's configured DNS resolvers can never be blocked (`NETWATCH_PROTECT=ip,ip` adds more). This cannot stop malware that runs as *you*.
+- **Trusted config only**: when Netwatch runs as root, `policy.json`, `custom.txt`, `domains.txt`, `baseline.json` and `blocked.json` are used only if
+  they (and the data folder) are owned by root and not group/world-writable; otherwise they are ignored and the dashboard shows the exact fix. All
+  writes refuse symlinks, so a hostile link in the data folder can't make a root process overwrite a system file. After running `sudo`, fix a
+  user-owned folder with: `sudo chown -R root ~/.netwatch && sudo chmod -R go-w ~/.netwatch`, then edit config with `sudo`.
+  `NETWATCH_UNSAFE_CONFIG=1` disables the check (not recommended).
 
 Run on macOS: `sudo node server.js`. Tests: `npm test`; root-only integration tests: `npm run test:integration`.
 

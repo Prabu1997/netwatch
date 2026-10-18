@@ -35,6 +35,10 @@ tr.closed{opacity:.5}
 <main><table><thead><tr><th>Risk</th><th>Status</th><th>Proc (pid, user)</th><th>App</th><th>Local</th><th>Remote</th><th>Owner (ASN)</th><th>Age</th><th>Flags</th><th></th></tr></thead><tbody id="rows"></tbody></table></main>
 <script>
 const $=id=>document.getElementById(id);let data=null;
+// Access token: arrives once in the link (#t=...), is remembered, and is sent with every request.
+const TK='nwtoken';let token='';
+try{const h=location.hash.match(/t=([\w-]+)/);if(h){localStorage.setItem(TK,h[1]);history.replaceState(null,'',location.pathname)}token=localStorage.getItem(TK)||''}catch{}
+const hdr=()=>({'X-Netwatch-Token':token,'X-Netwatch':'1','Content-Type':'application/json'});
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const age=ms=>{const s=Math.floor(ms/1000);return s<60?s+'s':s<3600?Math.floor(s/60)+'m':Math.floor(s/3600)+'h'};
 function render(){
@@ -50,6 +54,10 @@ function render(){
  const i=data.intel,ok=Object.values(i.feeds).filter(f=>f.ok).length,n=Object.keys(i.feeds).length;
  $('feeds').innerHTML='threat feeds <b>'+(i.updated?ok+'/'+(n||i.feedDefs.length):'loading…')+'</b>'+(i.updated?' · '+i.total.toLocaleString()+' entries · updated '+age(data.t-i.updated)+' ago':'');
  const bk=data.block;$('feeds').innerHTML+=' · blocking <b>'+(bk.available?(bk.auto?'auto':'manual'):'off')+'</b> ('+Object.keys(bk.list).length+' rules)';
+ $('alert').innerHTML+=(data.integrity||[]).map(i=>'<div><b>Config ignored:</b> '+esc(i.reason)+' <span class="mut">fix: '+esc(i.fix)+'</span></div>').join('');
+ if((data.integrity||[]).length)$('alert').hidden=false;
+ const dn=data.dns;
+ $('feeds').innerHTML+=' · domains <b>'+dn.domains.toLocaleString()+'</b>'+(dn.enabled?' · DNS filter <b style="color:var(--'+(dn.listening?'ok':'hi')+')">'+(dn.listening?'on :'+dn.port+' ('+dn.stats.blocked+' blocked / '+dn.stats.queries+')':'off')+'</b>'+(dn.error?' <span style="color:var(--hi)">'+esc(dn.error)+'</span>':'')+(dn.listening&&!dn.upstreams?' <span style="color:var(--hi)">no upstream: set DNS_UPSTREAM</span>':''):'');
  const c=data.capture,p=data.policy,bl=data.baseline;
  $('feeds').innerHTML+=' · baseline <b>'+(bl.learning?'learning ('+Math.max(1,Math.ceil((bl.until-data.t)/60000))+'m left)':'active')+'</b> ('+bl.procs+' programs)';
  $('feeds').innerHTML+=' · '+esc(data.platform)+' · App-ID <b style="color:var(--'+(c.running?'ok':'med')+')">'+(c.running?'capturing ('+c.packets+' pkts)':'ports only')+'</b>'+(c.error&&!c.running?' <span class="mut">('+esc(c.error)+')</span>':'')
@@ -57,7 +65,7 @@ function render(){
  $('feeds').title=i.feedDefs.map(d=>{const f=i.feeds[d.id]||{};return d.name+': '+(f.ok?f.count+' entries':'FAILED '+(f.error||''))}).join('\n');
  $('rows').innerHTML=l.map(s=>`<tr class="s${s.sev} ${s.status}">
   <td>${['—','low','MED','HIGH'][s.sev]}</td>
-  <td><span class="st ${s.state}">${esc(s.proto)} ${esc(s.state)}</span>${s.status==='closed'?' <span class="mut">closed</span>':''}</td>
+  <td><span class="st ${s.state}">${esc(s.proto)} ${esc(s.state)}</span>${s.status==='closed'?' <span class="mut">closed</span>':''}${s.origin==='packet'?' <span class="cloud" title="Seen only by packet capture (short-lived or UDP/QUIC): '+s.pkts+' packets, '+s.bytes+' bytes">pkt</span>':''}</td>
   <td title="${esc(s.exe||'')}&#10;${esc(s.cmd||'')}">${s.proc?esc(s.proc):'<span class="mut">unknown</span>'} <span class="mut">${s.pid??''} ${esc(s.user||'')}</span></td>
   <td><b>${esc(s.app)}</b><div class="mut" title="identified by ${esc(s.appVia||'')}${s.ja3?'&#10;JA3 '+esc(s.ja3):''}">${esc(s.sni||'')}</div></td>
   <td class="mut">${esc(s.local)}</td><td>${esc(s.remote)}</td>
@@ -68,8 +76,8 @@ function render(){
 }
 document.addEventListener('click',async e=>{const b=e.target.closest('button[data-a]');if(!b)return;
  if(b.dataset.a==='block'&&!confirm('Drop all outbound traffic to '+b.dataset.ip+'?'))return;
- const r=await fetch('/api/'+b.dataset.a,{method:'POST',headers:{'X-Netwatch':'1','Content-Type':'application/json'},body:JSON.stringify({ip:b.dataset.ip})});
- if(!r.ok)alert((await r.json()).err||'failed')});
+ const r=await fetch('/api/'+b.dataset.a,{method:'POST',headers:hdr(),body:JSON.stringify({ip:b.dataset.ip})});
+ if(!r.ok)alert((await r.json().catch(()=>({}))).err||'failed')});
 const notified=new Set();let flash=null;
 function notify(bad){const fresh=bad.filter(s=>!notified.has(s.id));fresh.forEach(s=>notified.add(s.id));if(!fresh.length)return;
  if('Notification' in window&&Notification.permission==='granted')new Notification('Netwatch: malicious IP contacted',{body:fresh.map(s=>(s.proc||'unknown')+' → '+s.remote+(s.blocked?' (blocked)':'')).join('\n')});
@@ -77,7 +85,14 @@ function notify(bad){const fresh=bad.filter(s=>!notified.has(s.id));fresh.forEac
  clearInterval(flash);let n=0;flash=setInterval(()=>{document.title=n++%2?'Netwatch':'⚠ MALICIOUS IP';if(n>10){clearInterval(flash);document.title='Netwatch'}},700)}
 if('Notification' in window&&Notification.permission==='default')document.addEventListener('click',()=>Notification.requestPermission(),{once:true});
 $('q').oninput=$('f').onchange=render;
-function connect(){const es=new EventSource('/events');
+async function ensureToken(){
+ for(let i=0;i<3;i++){
+  const r=await fetch('/api/ping',{headers:hdr()}).catch(()=>null);
+  if(!r||r.ok)return;
+  if(r.status!==401)return;
+  const t=prompt('Netwatch access token (printed in the server output when it started):');
+  if(!t)return;token=t.trim();try{localStorage.setItem(TK,token)}catch{}}}
+async function connect(){await ensureToken();const es=new EventSource('/events?t='+encodeURIComponent(token));
  es.onopen=()=>{$('dot').className='dot on';$('conn').textContent='live'};
  es.onmessage=e=>{data=JSON.parse(e.data);render()};
  es.onerror=()=>{$('dot').className='dot';$('conn').textContent='reconnecting'}}

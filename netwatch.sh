@@ -26,6 +26,7 @@ start() {
     -v /etc/passwd:/etc/passwd:ro -v $VOL:/app/data \
     $IMAGE >/dev/null
   echo "Netwatch started: http://127.0.0.1:$PORT   (auto-block: ${AUTOBLOCK:-0})"
+  echo "Open the dashboard with: ./netwatch.sh open   (the API needs an access token; './netwatch.sh token' prints it)"
   echo "It will start automatically after reboot. Stop it with: ./netwatch.sh stop"
 }
 
@@ -66,7 +67,9 @@ case "${1:-help}" in
   restart) stop; start ;;
   status) status ;;
   logs) docker logs -f --tail 50 $NAME ;;
-  open) xdg-open "http://127.0.0.1:$PORT" ;;
+  open) T=$(docker exec $NAME cat /app/data/api-token 2>/dev/null || true)  # the dashboard needs this token; it is stored in your browser after the first visit
+        URL="http://127.0.0.1:$PORT/#t=$T"; (xdg-open "$URL" 2>/dev/null || open "$URL" 2>/dev/null || echo "Open: $URL") ;;
+  token) docker exec $NAME cat /app/data/api-token ;;
   alerts) docker exec $NAME cat /app/data/alerts.jsonl ;;
   unblock-all) unblock_all ;;
   uninstall) uninstall ;;
