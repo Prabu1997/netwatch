@@ -50,7 +50,8 @@ function render(){
  const i=data.intel,ok=Object.values(i.feeds).filter(f=>f.ok).length,n=Object.keys(i.feeds).length;
  $('feeds').innerHTML='threat feeds <b>'+(i.updated?ok+'/'+(n||i.feedDefs.length):'loading…')+'</b>'+(i.updated?' · '+i.total.toLocaleString()+' entries · updated '+age(data.t-i.updated)+' ago':'');
  const bk=data.block;$('feeds').innerHTML+=' · blocking <b>'+(bk.available?(bk.auto?'auto':'manual'):'off')+'</b> ('+Object.keys(bk.list).length+' rules)';
- const c=data.capture,p=data.policy;
+ const c=data.capture,p=data.policy,bl=data.baseline;
+ $('feeds').innerHTML+=' · baseline <b>'+(bl.learning?'learning ('+Math.max(1,Math.ceil((bl.until-data.t)/60000))+'m left)':'active')+'</b> ('+bl.procs+' programs)';
  $('feeds').innerHTML+=' · '+esc(data.platform)+' · App-ID <b style="color:var(--'+(c.running?'ok':'med')+')">'+(c.running?'capturing ('+c.packets+' pkts)':'ports only')+'</b>'+(c.error&&!c.running?' <span class="mut">('+esc(c.error)+')</span>':'')
   +' · policy <b>'+p.rules+'</b> rules'+(p.enforce?' <b>enforcing</b>':' (monitor)')+(p.error?' <span style="color:var(--hi)">'+esc(p.error)+'</span>':'');
  $('feeds').title=i.feedDefs.map(d=>{const f=i.feeds[d.id]||{};return d.name+': '+(f.ok?f.count+' entries':'FAILED '+(f.error||''))}).join('\n');

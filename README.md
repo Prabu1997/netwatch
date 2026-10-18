@@ -29,6 +29,12 @@ Netwatch runs natively on both. Linux uses `ss` + `/proc` + iptables; macOS uses
 - **Policy**: copy `policy.example.json` to `data/policy.json`. Rules are checked top to bottom, first match wins, and the file reloads
   while running. Fields: `action` (allow/deny/alert), `app`, `proc`, `user`, `proto`, `dst` (IP, CIDR, `feed:<id>`, `feed:any`), `dport`, `country`, `external`.
 - **Enforcement** is opt-in: `ENFORCE=1` blocks destinations matched by a `deny` rule. macOS needs `sudo`; undo with `sudo pfctl -f /etc/pf.conf`.
+- **Detections that need no threat feed** (a fresh attacker server on a clean AWS IP still trips these):
+  - *Protocol/port mismatch*: App-ID reads the protocol actually on the wire, so SSH on port 443, plain HTTP on 443 or TLS on port 80/22 is flagged.
+    Needs root capture. STARTTLS mail ports are exempt.
+  - *First contact*: for interpreters and download tools (python, node, curl, bash, nc, ...), the first time a program connects to a
+    destination it has never used. The first 10 minutes only learn (`BASELINE_LEARN_MIN=<n>` to change); the baseline persists in
+    `data/baseline.json`. Browsers and apps are deliberately excluded because they contact new sites constantly. Medium severity: flagged, never auto-blocked.
 - Not done yet: decrypting TLS, so encrypted payloads are classified by SNI and metadata only.
 
 Run on macOS: `sudo node server.js`. Tests: `npm test`; root-only integration tests: `npm run test:integration`.

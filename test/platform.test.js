@@ -37,7 +37,11 @@ test('darwin: parse lsof -F output', () => {
 });
 
 test('darwin: parse ps output', () => {
-  assert.deepEqual(darwin.parsePs('  alice  1 /usr/bin/ssh -p 22 host\n'), { exe: '/usr/bin/ssh', cmd: '/usr/bin/ssh -p 22 host', user: 'alice', ppid: 1, deleted: false });
+  assert.deepEqual(darwin.parsePs('  alice  1 /usr/bin/ssh\n', '/usr/bin/ssh -p 22 host\n'), { exe: '/usr/bin/ssh', cmd: '/usr/bin/ssh -p 22 host', user: 'alice', ppid: 1, deleted: false });
+  // app bundles live in folders with spaces: the exe must not be cut at the first space
+  const app = darwin.parsePs(' bob 1 /Applications/Visual Studio Code.app/Contents/MacOS/Electron\n', 'Electron --type=renderer');
+  assert.equal(app.exe, '/Applications/Visual Studio Code.app/Contents/MacOS/Electron');
+  assert.equal(app.cmd, 'Electron --type=renderer');
   assert.equal(darwin.parsePs(''), null);
 });
 

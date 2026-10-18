@@ -11,6 +11,8 @@ const platform = require('./lib/platform');
 const policy = require('./lib/policy');
 const { FlowTable, startCapture } = require('./lib/flows');
 const { classify } = require('./lib/appid');
+const anomaly = require('./lib/anomaly');
+const { Baseline } = require('./lib/baseline');
 
 const PORT = +process.env.PORT || 8080;
 const HOST = process.env.HOST || '127.0.0.1';
@@ -19,6 +21,8 @@ const AUTOBLOCK = process.env.AUTOBLOCK === '1'; // opt-in: DROP outbound to any
 const ENFORCE = process.env.ENFORCE === '1';     // opt-in: block destinations that a policy "deny" rule matches
 const CAPTURE = process.env.CAPTURE !== '0';     // App-ID packet capture (needs root); falls back to port/process only
 const POLICY_FILE = path.join(intel.DATA_DIR, 'policy.json');
+const BASELINE_FILE = path.join(intel.DATA_DIR, 'baseline.json');
+const LEARN_MIN = process.env.BASELINE_LEARN_MIN != null ? +process.env.BASELINE_LEARN_MIN : 10; // quiet period before "first contact" flags
 const GONE_KEEP_MS = 5 * 60 * 1000;
 
 const SHELLS = platform.SHELLS;
@@ -43,6 +47,7 @@ async function procInfo(pid) {
 }
 
 const flows = new FlowTable();
+const baseline = Baseline.load(BASELINE_FILE, { learnMs: LEARN_MIN * 60 * 1000 });
 let capture = { running: false, error: 'disabled', packets: 0 };
 let rules = [], rulesError = null;
 function loadRules() {
@@ -107,6 +112,7 @@ async function poll() {
     }
     s.holders = r.holders; s.state = r.state; s.last = now; s.status = 'active'; s.gone = null;
     s.p = await procInfo(r.pid);
+    checkBaseline(s, now);
   }
   for (const [key, s] of sessions) {
     if (!seen.has(key)) {
@@ -114,6 +120,18 @@ async function poll() {
       else if (now - s.gone > GONE_KEEP_MS) sessions.delete(key);
     }
   }
+}
+
+// Once per session: has this program ever talked to this destination before? Waits a few seconds for the
+// hostname (SNI) to be captured, since a name is a steadier identity than a CDN address.
+function checkBaseline(s, now) {
+  if (s.baselined || s.state !== 'ESTAB' || isPrivate(s.rip) || !s.proc) return;
+  const fl = flows.get(s.proto, s.lip, s.lport, s.rip, s.rport) || {};
+  const name = fl.sni || fl.host || flows.nameFor(s.rip);
+  if (!name && now - s.first < 4000) return;
+  s.baselined = true;
+  s.destKey = name || s.rip;
+  s.newDest = baseline.observe(anomaly.normProc(s.p?.exe || s.proc), s.destKey, now) === 'new';
 }
 
 const alerted = new Set();
@@ -141,6 +159,8 @@ function snapshot() {
     const flags = assess(s);
     const fl = flows.get(s.proto, s.lip, s.lport, s.rip, s.rport) || {};
     const ext = !isPrivate(s.rip);
+    flags.push(...anomaly.protocolMismatch(fl, s));
+    if (s.newDest && anomaly.isRisky(s.proc)) flags.push(['med', `First contact: "${s.proc}" has never connected to ${s.destKey} before`, 'baseline']);
     const id = classifyFallback(s, fl);
     const verdict = ext && s.state !== 'LISTEN' && s.state !== 'UNCONN'
       ? policy.evaluate(rules, { proto: s.proto, app: id.app, proc: s.proc, user: s.p?.user, rip: s.rip, rport: s.rport, cc: info.cc, external: ext,
@@ -156,7 +176,8 @@ function snapshot() {
   list.sort((a, b) => b.sev - a.sev || b.last - a.last);
   logAlerts(list);
   return { t: Date.now(), platform: platform.name, capture: { running: capture.running, error: capture.error, packets: capture.packets },
-    policy: { rules: rules.length, error: rulesError, enforce: ENFORCE }, intel: intel.status(), block: { available: blocker.available(), error: blocker.error(), auto: AUTOBLOCK, list: blocker.list() }, sessions: list };
+    policy: { rules: rules.length, error: rulesError, enforce: ENFORCE },
+    baseline: { learning: baseline.learning(), until: baseline.learnUntil, procs: baseline.procs.size }, intel: intel.status(), block: { available: blocker.available(), error: blocker.error(), auto: AUTOBLOCK, list: blocker.list() }, sessions: list };
 }
 
 const clients = new Set();
@@ -195,6 +216,9 @@ const server = http.createServer((req, res) => {
 intel.init();
 blocker.init();
 loadRules();
+setInterval(() => baseline.save(BASELINE_FILE), 30000).unref();
+process.on('SIGINT', () => { baseline.save(BASELINE_FILE); process.exit(0); });
+process.on('SIGTERM', () => { baseline.save(BASELINE_FILE); process.exit(0); });
 fs.watchFile(POLICY_FILE, { interval: 2000 }, loadRules);
 if (CAPTURE) capture = startCapture(flows, platform);
 server.listen(PORT, HOST, () => console.log(`netwatch on http://${HOST}:${PORT}  `));
