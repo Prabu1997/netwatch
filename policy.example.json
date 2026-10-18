@@ -1,0 +1,7 @@
+[
+  { "name": "block-known-c2", "action": "deny", "dst": ["feed:feodo", "feed:et", "feed:drop"] },
+  { "name": "alert-tor", "action": "alert", "dst": ["feed:tor"] },
+  { "name": "no-telnet-or-rdp-out", "action": "deny", "external": true, "dport": [23, 3389] },
+  { "name": "shells-must-not-call-out", "action": "alert", "proc": ["nc", "ncat", "socat"], "external": true },
+  { "name": "allow-rest", "action": "allow" }
+]

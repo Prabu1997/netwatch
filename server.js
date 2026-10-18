@@ -6,15 +6,22 @@ const path = require('path');
 const dns = require('dns').promises;
 const { execFile } = require('child_process');
 const intel = require('./intel');
-const blocker = require('./block');
+const blocker = require('./lib/enforce');
+const platform = require('./lib/platform');
+const policy = require('./lib/policy');
+const { FlowTable, startCapture } = require('./lib/flows');
+const { classify } = require('./lib/appid');
 
 const PORT = +process.env.PORT || 8080;
 const HOST = process.env.HOST || '127.0.0.1';
 const POLL_MS = +process.env.POLL_MS || 2000;
 const AUTOBLOCK = process.env.AUTOBLOCK === '1'; // opt-in: DROP outbound to any IP hit by a HIGH feed
+const ENFORCE = process.env.ENFORCE === '1';     // opt-in: block destinations that a policy "deny" rule matches
+const CAPTURE = process.env.CAPTURE !== '0';     // App-ID packet capture (needs root); falls back to port/process only
+const POLICY_FILE = path.join(intel.DATA_DIR, 'policy.json');
 const GONE_KEEP_MS = 5 * 60 * 1000;
 
-const SHELLS = new Set(['sh', 'bash', 'dash', 'zsh', 'ash', 'ksh', 'fish', 'nc', 'ncat', 'netcat', 'socat', 'telnet']);
+const SHELLS = platform.SHELLS;
 const COMMON_PORTS = new Set([22, 53, 80, 123, 143, 443, 465, 587, 853, 993, 995, 5228, 8080, 8443]);
 const SUSPECT_DIRS = ['/tmp/', '/dev/shm/', '/var/tmp/', '/run/user/'];
 
@@ -25,53 +32,26 @@ let seq = 0;
 const isPrivate = ip =>
   /^(10\.|127\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|::1$|fe80:|f[cd][0-9a-f]{2}:)/i.test(ip) || ip === '*' || ip === '0.0.0.0' || ip === '::';
 
-function splitAddr(a) {
-  a = a.replace(/%[^:\]]+/, ''); // strip %iface
-  const i = a.lastIndexOf(':');
-  return { ip: a.slice(0, i).replace(/^\[|\]$/g, ''), port: a.slice(i + 1) };
-}
-
-function runSS() {
-  return new Promise(res => execFile('ss', ['-tunapH'], { maxBuffer: 16e6 }, (e, out) => res(e ? '' : out)));
-}
-
-function parseSS(out) {
-  const rows = [];
-  for (const line of out.split('\n')) {
-    const f = line.trim().split(/\s+/);
-    if (f.length < 6) continue;
-    const [proto, state, , , local, remote] = f;
-    const holders = [...line.matchAll(/\("([^"]*)",pid=(\d+)/g)].map(h => ({ name: h[1], pid: +h[2] }));
-    // a socket can be shared by several processes (fork/exec): prefer a shell-like holder as the primary
-    const m = holders.find(h => SHELLS.has(h.name)) || holders[0];
-    const l = splitAddr(local), r = splitAddr(remote);
-    rows.push({ proto, state, lip: l.ip, lport: +l.port || 0, rip: r.ip, rport: +r.port || 0,
-      proc: m ? m.name : null, pid: m ? m.pid : null, holders: holders.map(h => h.name) });
-  }
-  return rows;
-}
-
 const procCache = new Map(); // pid -> {t, info}
-function procInfo(pid) {
+async function procInfo(pid) {
   if (!pid) return null;
   const c = procCache.get(pid);
   if (c && Date.now() - c.t < 30000) return c.info;
-  const info = { exe: null, cmd: null, user: null, ppid: null, deleted: false };
-  try { info.exe = fs.readlinkSync(`/proc/${pid}/exe`); } catch {}
-  if (info.exe && info.exe.endsWith(' (deleted)')) { info.deleted = true; info.exe = info.exe.replace(' (deleted)', ''); }
-  try { info.cmd = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ').trim().slice(0, 200); } catch {}
-  try {
-    const s = fs.readFileSync(`/proc/${pid}/status`, 'utf8');
-    info.ppid = +(s.match(/PPid:\s+(\d+)/) || [])[1] || null;
-    const uid = (s.match(/Uid:\s+(\d+)/) || [])[1];
-    info.user = uid;
-    try {
-      const pw = fs.readFileSync('/etc/passwd', 'utf8').split('\n').find(l => l.split(':')[2] === uid);
-      if (pw) info.user = pw.split(':')[0];
-    } catch {}
-  } catch {}
+  const info = await platform.procInfo(pid);
   procCache.set(pid, { t: Date.now(), info });
   return info;
+}
+
+const flows = new FlowTable();
+let capture = { running: false, error: 'disabled', packets: 0 };
+let rules = [], rulesError = null;
+function loadRules() {
+  try {
+    const r = JSON.parse(fs.readFileSync(POLICY_FILE, 'utf8'));
+    const errs = policy.validate(r);
+    if (errs.length) { rulesError = errs.join('; '); return; } // keep the last good rulebase
+    rules = r; rulesError = null;
+  } catch (e) { if (e.code !== 'ENOENT') rulesError = String(e.message); else { rules = []; rulesError = null; } }
 }
 
 function enrich(ip) {
@@ -113,7 +93,7 @@ function assess(s) {
 
 async function poll() {
   const now = Date.now();
-  const rows = parseSS(await runSS());
+  const rows = await platform.connections();
   const seen = new Set();
   for (const r of rows) {
     if (r.state === 'UNCONN' && r.rip === '*') continue; // idle UDP sockets: noise
@@ -126,7 +106,7 @@ async function poll() {
       enrich(r.rip);
     }
     s.holders = r.holders; s.state = r.state; s.last = now; s.status = 'active'; s.gone = null;
-    s.p = procInfo(r.pid);
+    s.p = await procInfo(r.pid);
   }
   for (const [key, s] of sessions) {
     if (!seen.has(key)) {
@@ -141,26 +121,42 @@ function logAlerts(list) {
   for (const x of list) {
     if (x.sev < 3 || alerted.has(x.id)) continue;
     alerted.add(x.id);
-    if (AUTOBLOCK && x.flags.some(f => f[2] === 'feed' && f[0] === 'high'))
+    if ((AUTOBLOCK && x.flags.some(f => f[2] === 'feed' && f[0] === 'high')) || (ENFORCE && x.policy?.action === 'deny'))
       blocker.block(x.rip, x.flags.map(f => f[1]).join('; ')).then(r => console.log(`autoblock ${x.rip}: ${r.ok ? 'DROP rule added' : r.err}`));
     const line = JSON.stringify({ t: new Date().toISOString(), proc: x.proc, pid: x.pid, user: x.user, remote: x.remote, blocked: AUTOBLOCK, asn: x.asn, org: x.org, flags: x.flags.map(f => f[1]) });
     try { fs.mkdirSync(intel.DATA_DIR, { recursive: true }); fs.appendFileSync(path.join(intel.DATA_DIR, 'alerts.jsonl'), line + '\n'); } catch {}
   }
 }
 
+// App-ID from captured payload when available, otherwise from port (and the hostname we saw for this IP).
+function classifyFallback(s, fl) {
+  if (fl.app) return { app: fl.app, via: fl.via };
+  const name = flows.nameFor(s.rip);
+  return classify({ sni: name, proto: s.proto, rport: s.rport });
+}
+
 function snapshot() {
   const list = [...sessions.values()].map(s => {
     const info = ipInfo.get(s.rip) || {};
     const flags = assess(s);
+    const fl = flows.get(s.proto, s.lip, s.lport, s.rip, s.rport) || {};
+    const ext = !isPrivate(s.rip);
+    const id = classifyFallback(s, fl);
+    const verdict = ext && s.state !== 'LISTEN' && s.state !== 'UNCONN'
+      ? policy.evaluate(rules, { proto: s.proto, app: id.app, proc: s.proc, user: s.p?.user, rip: s.rip, rport: s.rport, cc: info.cc, external: ext,
+        feeds: intel.lookup(s.rip).map(f => f.id) })
+      : { action: 'allow', rule: 'n/a', index: -1 };
+    if (verdict.action !== 'allow') flags.push([verdict.action === 'deny' ? 'high' : 'med', `Policy "${verdict.rule}": ${verdict.action}`, 'policy']);
     const sev = flags.some(f => f[0] === 'high') ? 3 : flags.some(f => f[0] === 'med') ? 2 : flags.length ? 1 : 0;
-    return { id: s.id, proto: s.proto, state: s.state, status: s.status, local: `${s.lip}:${s.lport}`,
+    return { id: s.id, app: id.app, appVia: id.via, sni: fl.sni || fl.host || flows.nameFor(s.rip), ja3: fl.ja3 || null, policy: verdict, proto: s.proto, state: s.state, status: s.status, local: `${s.lip}:${s.lport}`,
       remote: s.rip === '*' ? '*' : `${s.rip}:${s.rport}`, rip: s.rip, host: info.host || null, asn: info.asn || null, org: info.org || null, cc: info.cc || null, cloud: !!info.cloud,
       external: !isPrivate(s.rip), blocked: blocker.isBlocked(s.rip), proc: s.proc, pid: s.pid, exe: s.p?.exe || null, cmd: s.p?.cmd || null,
       user: s.p?.user || null, first: s.first, last: s.last, flags, sev };
   });
   list.sort((a, b) => b.sev - a.sev || b.last - a.last);
   logAlerts(list);
-  return { t: Date.now(), intel: intel.status(), block: { available: blocker.available(), error: blocker.error(), auto: AUTOBLOCK, list: blocker.list() }, sessions: list };
+  return { t: Date.now(), platform: platform.name, capture: { running: capture.running, error: capture.error, packets: capture.packets },
+    policy: { rules: rules.length, error: rulesError, enforce: ENFORCE }, intel: intel.status(), block: { available: blocker.available(), error: blocker.error(), auto: AUTOBLOCK, list: blocker.list() }, sessions: list };
 }
 
 const clients = new Set();
@@ -198,4 +194,7 @@ const server = http.createServer((req, res) => {
 
 intel.init();
 blocker.init();
+loadRules();
+fs.watchFile(POLICY_FILE, { interval: 2000 }, loadRules);
+if (CAPTURE) capture = startCapture(flows, platform);
 server.listen(PORT, HOST, () => console.log(`netwatch on http://${HOST}:${PORT}  `));

@@ -20,6 +20,19 @@ Zero npm dependencies (Node.js built-ins only), runs in one Docker container, ev
 
 The owner (e.g. AWS) is shown but never trusted: a feed hit on an AWS IP is still flagged. Cloud providers just get a small "cloud" tag.
 
+## Firewall mode (Linux and macOS)
+
+Netwatch runs natively on both. Linux uses `ss` + `/proc` + iptables; macOS uses `lsof` + `ps` + `pf`.
+
+- **App-ID**: with root, `tcpdump` feeds a parser that reads TLS SNI, JA3 hash, HTTP Host and DNS names, so each connection is labelled
+  with an application (github, youtube, ssh, ...), not just a port. Without root it falls back to process and port.
+- **Policy**: copy `policy.example.json` to `data/policy.json`. Rules are checked top to bottom, first match wins, and the file reloads
+  while running. Fields: `action` (allow/deny/alert), `app`, `proc`, `user`, `proto`, `dst` (IP, CIDR, `feed:<id>`, `feed:any`), `dport`, `country`, `external`.
+- **Enforcement** is opt-in: `ENFORCE=1` blocks destinations matched by a `deny` rule. macOS needs `sudo`; undo with `sudo pfctl -f /etc/pf.conf`.
+- Not done yet: decrypting TLS, so encrypted payloads are classified by SNI and metadata only.
+
+Run on macOS: `sudo node server.js`. Tests: `npm test`; root-only integration tests: `npm run test:integration`.
+
 ## Requirements
 
 - Linux (uses `ss` and `/proc`)

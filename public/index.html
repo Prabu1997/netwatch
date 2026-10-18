@@ -32,7 +32,7 @@ tr.closed{opacity:.5}
  <select id="f"><option value="all">all</option><option value="ext">external only</option><option value="flag">flagged only</option><option value="active">active only</option></select>
 </header>
 <div id="alert" hidden></div>
-<main><table><thead><tr><th>Risk</th><th>Status</th><th>Proc (pid, user)</th><th>Local</th><th>Remote</th><th>Owner (ASN)</th><th>Age</th><th>Flags</th><th></th></tr></thead><tbody id="rows"></tbody></table></main>
+<main><table><thead><tr><th>Risk</th><th>Status</th><th>Proc (pid, user)</th><th>App</th><th>Local</th><th>Remote</th><th>Owner (ASN)</th><th>Age</th><th>Flags</th><th></th></tr></thead><tbody id="rows"></tbody></table></main>
 <script>
 const $=id=>document.getElementById(id);let data=null;
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -42,7 +42,7 @@ function render(){
  let l=data.sessions;
  $('n').textContent=l.length;$('ne').textContent=l.filter(s=>s.external).length;$('nf').textContent=l.filter(s=>s.sev).length;
  l=l.filter(s=>(f==='all'||(f==='ext'&&s.external)||(f==='flag'&&s.sev)||(f==='active'&&s.status==='active'))
-  &&(!q||[s.remote,s.proc,s.host,s.owner,s.exe].join(' ').toLowerCase().includes(q)));
+  &&(!q||[s.remote,s.proc,s.host,s.owner,s.exe,s.app,s.sni].join(' ').toLowerCase().includes(q)));
  const bad=data.sessions.filter(s=>s.flags.some(f=>f[2]==='feed'&&f[0]==='high')&&s.status==='active');
  notify(bad);
  $('alert').hidden=!bad.length;
@@ -50,11 +50,15 @@ function render(){
  const i=data.intel,ok=Object.values(i.feeds).filter(f=>f.ok).length,n=Object.keys(i.feeds).length;
  $('feeds').innerHTML='threat feeds <b>'+(i.updated?ok+'/'+(n||i.feedDefs.length):'loading…')+'</b>'+(i.updated?' · '+i.total.toLocaleString()+' entries · updated '+age(data.t-i.updated)+' ago':'');
  const bk=data.block;$('feeds').innerHTML+=' · blocking <b>'+(bk.available?(bk.auto?'auto':'manual'):'off')+'</b> ('+Object.keys(bk.list).length+' rules)';
+ const c=data.capture,p=data.policy;
+ $('feeds').innerHTML+=' · '+esc(data.platform)+' · App-ID <b style="color:var(--'+(c.running?'ok':'med')+')">'+(c.running?'capturing ('+c.packets+' pkts)':'ports only')+'</b>'+(c.error&&!c.running?' <span class="mut">('+esc(c.error)+')</span>':'')
+  +' · policy <b>'+p.rules+'</b> rules'+(p.enforce?' <b>enforcing</b>':' (monitor)')+(p.error?' <span style="color:var(--hi)">'+esc(p.error)+'</span>':'');
  $('feeds').title=i.feedDefs.map(d=>{const f=i.feeds[d.id]||{};return d.name+': '+(f.ok?f.count+' entries':'FAILED '+(f.error||''))}).join('\n');
  $('rows').innerHTML=l.map(s=>`<tr class="s${s.sev} ${s.status}">
   <td>${['—','low','MED','HIGH'][s.sev]}</td>
   <td><span class="st ${s.state}">${esc(s.proto)} ${esc(s.state)}</span>${s.status==='closed'?' <span class="mut">closed</span>':''}</td>
   <td title="${esc(s.exe||'')}&#10;${esc(s.cmd||'')}">${s.proc?esc(s.proc):'<span class="mut">unknown</span>'} <span class="mut">${s.pid??''} ${esc(s.user||'')}</span></td>
+  <td><b>${esc(s.app)}</b><div class="mut" title="identified by ${esc(s.appVia||'')}${s.ja3?'&#10;JA3 '+esc(s.ja3):''}">${esc(s.sni||'')}</div></td>
   <td class="mut">${esc(s.local)}</td><td>${esc(s.remote)}</td>
   <td>${!s.external?'<span class="mut">local/private</span>':`${s.asn?`<b>${esc(s.asn)}</b> ${esc(s.org||'')} <span class="mut">${esc(s.cc||'')}</span>`:'<span class="mut">looking up…</span>'}${s.cloud?'<span class="cloud" title="Cloud/hosting provider: ownership alone proves nothing, judge by feed hits">cloud</span>':''}<div class="mut">${esc(s.host||'')}</div>`}</td>
   <td class="mut">${age(data.t-s.first)}</td>
